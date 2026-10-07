@@ -1,0 +1,569 @@
+---
+title: "ECON 586 - Econometrics II"
+subtitle: |
+   | Final Project
+   | Spring 2021
+author: "Mychelle Hale"
+papersize: a4
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+
+```{r setup, include=FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = F,
+                      fig.align   = 'center',
+                      tidy.opts=list(width.cutoff=60), dev = 'pdf'
+                      ,tidy=TRUE, include = T, results = 'hide', warning = F, fig.show ='hide' )
+```
+
+```{r setuppackages, results = 'hide', warning = FALSE, include = FALSE}
+require(knitr)
+require(sandwich)
+require(fUnitRoots)
+require(ggplot2)
+require(forecast)
+require(vars)
+require(urca)
+library(TSstudio)
+require(dplyr)
+library(imputeTS)
+library(tidyverse)
+require(lubridate)
+library(aweek)
+
+```
+
+
+# R Code
+
+```{r}
+city_day = read.csv('df_city_day.csv', header = T)
+# city_day = na.omit(city_day)
+stationscities = read.csv('df_station_day.csv', header = T)
+
+# stations = read.csv('stations.csv', header = T)
+# citylocs = read.csv('IndianCitiesDatabase.csv')
+
+```
+
+```{r}
+dfday = read.csv('df_day.csv', header = T)
+dfday['BTX'] = dfday['Benzene']+dfday['Toluene']+dfday['Xylene']
+dfday['ParticulateMatter'] = dfday['PM2.5']+dfday['PM10']
+# dfcols = c('Date', 'AQI','PM2.5','PM10','NO2', 'CO', 'SO2','O3', 'BTX', 'ParticulateMatter')
+dfcols = c('Date', 'AQI','PM2.5','PM10','NO2', 'CO', 'SO2','O3')
+dfdays = dfday[dfcols]
+
+```
+
+#Picking top two cities with worst AQI
+
+```{r}
+
+dfdays <- dfdays %>% 
+  group_by(week = factor_aweek(date2week(Date))) %>%
+  mutate(AQI.wk.average = mean(AQI))%>%
+  ungroup() %>%
+  group_by(month = format(as.Date(Date), "%Y-%m")) %>%
+  mutate(AQI.mo.average = mean(AQI))
+  
+
+dfweeks = aggregate(dfdays[,-c(1,9,10,11,12)], list(dfdays$week), mean)
+names(dfweeks)[1] = paste("Week")
+
+dfmonths = aggregate(dfdays[,-c(1,9,10,11,12)], list(dfdays$month), mean)
+names(dfmonths)[1] = paste("Month")
+
+#for forecasting. We will choose the week that corresponds to this date. then select it from dfweeks
+loc = which(dfdays[,1]=="2019-01-01")
+
+CO1 <- dfdays[(1:loc),2]
+
+
+AQI = dfweeks$AQI
+AQIWeek = dfweeks$AQI.wk.average
+# AQIMonth = dfmonths$AQI.mo.average
+PM25 = dfweeks$PM2.5
+PM10 = dfweeks$PM10
+NO2 = dfweeks$NO2
+CO = dfweeks$CO
+SO2 = dfweeks$SO2
+O3 = dfweeks$O3
+
+```
+
+```{r Plots}
+par(mfcol=c(2,4))
+plot(ts(dfweeks[,2], start = c(2015, 1), freq = 52), 
+     main = expression(AQI), xlab = "Year", ylab = "Level")
+plot(ts(dfweeks[,3], start = c(2015, 1), freq = 52), 
+     main = expression(PM[2.5]~Levels), xlab = "Year", ylab = expression(mu~"g"/~m^3))
+plot(ts(dfweeks[,4], start = c(2015, 1), freq = 52), 
+     main = expression(PM[10]~Levels), xlab = "Year", ylab = expression(mu~"g"/~m^3))
+plot(ts(dfweeks[,5], start = c(2015, 1), freq = 52), 
+     main = expression(NO[2]~"Levels"), xlab = "Year", ylab = expression(mu~"g"/~m^3))
+plot(ts(dfweeks[,6], start = c(2015, 1), freq = 52), 
+     main = expression(CO~"Levels"), xlab = "Year", ylab = expression(mu~"g"/~m^3))
+plot(ts(dfweeks[,7], start = c(2015, 1), freq = 52), 
+     main = expression(SO[2]~"Levels"), xlab = "Year", ylab = expression(mu~"g"/~m^3))
+plot(ts(dfweeks[,8], start = c(2015, 1), freq = 52), 
+     main = expression(O[3]~"Levels"), xlab = "Year", ylab = expression(mu~"g"/~m^3))
+
+
+#ADF Test: H0 = unit root present. All are stationary when you do ADF with ct except NO2
+adfTest(AQI, lags = 1, type = 'nc') # unit root at 95. non-stationary
+# adfTest(AQIWeek, lags = 1, type = 'ct') #stationary
+# adfTest(AQIMonth, lags = 1, type = 'ct') #stationary
+adfTest(PM25, lags = 1, type = 'nc') # no unit root at 95. stationary
+adfTest(PM10, lags = 1, type = 'nc') #no unit root at 95. stationary
+adfTest(NO2, lags = 1, type = 'nc')# not stationary at any level
+adfTest(CO, lags = 1, type = 'nc')#no unit root. Stationary
+adfTest(SO2, lags = 1, type = 'nc')# stationary. no unit root at 95
+adfTest(O3, lags = 1, type = 'nc')#not stationary. unit root @ all levels
+
+## run a regression with time trend to identify the significance of the time trend
+
+```
+
+
+```{r SeasonPlots}
+
+par(mfrow=c(3,2))
+decompAQI = stl(ts(AQI, start = c(2015, 1), freq = 52), s.window = 9)
+plot(decompAQI, main = "STL Decomposition: AQI") #downward trend and seasonality
+
+decomp25 = stl(ts(dfweeks[,3], start = c(2015, 1), freq = 52), s.window = 9)
+plot(decomp25, main = "STL Decomposition: PM 2.5") #downward trend and seasonality
+
+decomp10 = stl(ts(dfweeks[,4], start = c(2015, 1), freq = 52), s.window = 9)
+plot(decomp10, main = "STL Decomposition: PM 10") #downward trend and seasonality
+
+decompNO2 = stl(ts(dfweeks[,5], start = c(2015, 1), freq = 52), s.window = 9)
+plot(decompNO2, main = "STL Decomposition: NO2") #no clear trend. Seasonality
+
+decompCO = stl(ts(dfweeks[,6], start = c(2015, 1), freq = 52), s.window = 9)
+plot(decompCO, main = "STL Decomposition: Carbon Monoxide") #Downward trend and seasonality
+
+decompSO2 = stl(ts(dfweeks[,7], start = c(2015, 1), freq = 52), s.window = 9)
+plot(decompSO2, main = "STL Decomposition: Sulfur Dioxide Levels") #unsure about this trend. No trend? seaosonality
+
+decompO3 = stl(ts(dfweeks[,8], start = c(2015, 1), freq = 52), s.window = 9)
+plot(decompO3, main = "STL Decomposition: Ozone") #no trend
+
+```
+
+```{r}
+##dont need to difference the values that are already stationary. 
+## remove the number of rows = differences from the parameters that are already stationary, then cbind all of them together. See HW 7
+## then use VAR Select to determine the number of optimal lags for the binded data set
+# then 3 and 4 from email. !!!!!! *********!!
+seasAQI = seasadj(decompAQI)
+seasPM25 = seasadj(decomp25)
+seasPM10 = seasadj(decomp10)
+seasNO2 = seasadj(decompNO2)
+seasCO = seasadj(decompCO)
+seasSO2 = seasadj(decompSO2)
+seasO3 = seasadj(decompO3)
+
+#check if they are stationary now. 
+adfTest(seasAQI, lags = 1, type = 'nc') # unit root at 95. non-stationary
+# adfTest(AQIWeek, lags = 1, type = 'nc') #stationary
+# adfTest(AQIMonth, lags = 1, type = 'nc') #stationary
+adfTest(seasPM25, lags = 1, type = 'nc') # no unit root at 95. stationary
+adfTest(seasPM10, lags = 1, type = 'nc') #no unit root at 95. stationary
+adfTest(seasNO2, lags = 1, type = 'nc')# not stationary at any level
+adfTest(seasCO, lags = 1, type = 'nc')#no unit root. Stationary
+adfTest(seasSO2, lags = 1, type = 'nc')# stationary. no unit root at 95
+adfTest(seasO3, lags = 1, type = 'nc')#not stationary. unit root @ all levels
+
+```
+
+```{r}
+#
+par(mfcol = c(2,2))
+dseasAQI = diff(seasAQI, lag = 1, differences = 1)
+plot(ts(dseasAQI, start = c(2015, 2), freq = 52),
+     main = expression(AQI~Levels), xlab = "Year", ylab = "")
+#
+dseasPM25 = diff(seasPM25, lag = 1, differences = 1)
+plot(ts(dseasPM25, start = c(2015, 2), freq = 52),
+     main = expression(PM[2.5]~Levels), xlab = "Year", ylab = "")
+#
+dseasPM10 = diff(seasPM10, lag = 1, differences = 1)
+plot(ts(dseasPM10, start = c(2015, 2), freq = 52),
+     main = expression(PM[10]~Levels), xlab = "Year", ylab = "")
+#
+dseasNO2 = diff(seasNO2, lag = 1, differences = 1)
+plot(ts(dseasNO2, start = c(2015, 2), freq = 52),
+     main = expression(NO[2]~Levels), xlab = "Year", ylab = "")
+#
+par(mfcol = c(3,1))
+dseasCO = diff(seasCO, lag = 1, differences = 1)
+plot(ts(dseasCO, start = c(2015, 2), freq = 52),
+     main = expression(CO~Levels), xlab = "Year", ylab = "")
+#
+dseasSO2 = diff(seasSO2, lag = 1, differences = 1)
+plot(ts(dseasSO2, start = c(2015, 2), freq = 52),
+     main = expression(SO[2]~Levels), xlab = "Year", ylab = "")
+#
+dseasO3 = diff(seasO3, lag = 1, differences = 1)
+plot(ts(dseasO3, start = c(2015, 2), freq = 52),
+     main = expression(O[3]~Levels), xlab = "Year", ylab = "")
+#
+```
+
+```{r}
+#check if they are stationary now.
+adfTest(dseasAQI, lags = 1, type = 'ct') #unit root at 95. non-stationary
+# adfTest(AQIWeek, lags = 1, type = 'ct') #stationary
+# adfTest(AQIMonth, lags = 1, type = 'ct') #stationary
+adfTest(dseasPM25, lags = 1, type = 'ct') #no unit root at 95. stationary
+adfTest(dseasPM10, lags = 1, type = 'ct') #no unit root at 95. stationary
+adfTest(dseasNO2, lags = 1, type = 'ct') #not stationary at any level
+adfTest(dseasCO, lags = 1, type = 'ct')#no unit root. Stationary
+adfTest(dseasSO2, lags = 1, type = 'ct') #stationary. no unit root at 95
+adfTest(dseasO3, lags = 1, type = 'ct')#not stationary. unit root @ all levels
+acf(dseasAQI, lag.max = 100)
+```
+
+# VAR Select
+
+```{r}
+## create a new data frame with differenced variables
+
+daseas = cbind(dseasAQI,dseasPM25,dseasPM10, dseasNO2,dseasCO, dseasSO2, dseasO3)
+
+vseseas = VARselect(y=daseas,lag.max = 8, type="none") #no constant/time trend based on ?
+
+
+crit = vseseas$criteria
+
+seq = c(1:3)
+seqs = c(1:8)
+crit1 = matrix(NA, 3, 8,
+            dimnames = list(c("AIC", "HQC","SIC"), paste("Lag ", seqs, 
+                                                        sep ="")))
+for (i in seq){
+  for (j in seqs){
+    crit1[which(seq==i),which(seqs==j)] = crit[i,j]
+  }
+}
+
+kable(round(crit1,3), caption = "Model Selection Criteria for Lags")
+
+```
+
+
+
+```{r}
+#identifying the optimal lag length, selection based on criteria
+selseas  = matrix(NA, 3, 1,
+            dimnames = list(c("AIC", "HQ","SIC"), paste("Lag", 
+                                                        sep ="")))
+sel = round(vseseas$selection,3) #tells you which one has the smallest from each model selection
+for (i in seq){
+  selseas[which(seq==i)] = sel[i]
+}
+kable(selseas, caption = "Optimal Lag Lengths") #SIC is more parsimonious while AIC likes larger models better. 
+
+```
+
+AIC says 20 lags are optimal, but SIC and HQC say 1 lag. We will go with 20.
+
+```{r}
+library(vars)
+p = 2 #optimal lag based on previous question 
+#run reduced form VAR with lag length = p, and w/o a constant
+va = vars::VAR(daseas,p=p,lag.max = 8,type="none")
+summary(va)
+
+p2 = 7 #optimal lag based on previous question 
+va2 = vars::VAR(daseas,p=7,lag.max =8,type="none")
+summary(va2)
+```
+
+
+
+```{r}
+bmat = diag(7) #question specifies 4x4. If this was not given, we would use the number of betas in the equation. This is the number of variables included in the equation. If there are 4 vars, then 4x4. Takes away the covariation between the variables.
+
+diag(bmat) = 1
+
+#define the diagonal and create our NA values in the matrix
+#Identify the NAs we plan to solve for
+# for setting up the Bmatrix: upper diagonal is all 0, lower diagonal is all NAs, diagonal is all NA.
+bmat[2,1] = NA
+bmat[3,1:2] = NA
+bmat[4,1:3] = NA
+bmat[5,1:4] = NA
+bmat[6,1:5] = NA
+bmat[7,1:6] = NA
+
+
+#Next we solve for the system to get our NA values for the #B-matrix
+#SVAR command to run regression to solve unknowns
+#we use the reduced form results/data
+#estimation type is direct
+#then we specify our A-matrix and B-matrix
+#warning bc number of meqns is = to the # of unknowns, so we cannot perform testing
+# reg = SVAR(va, estmethod = 'direct', Amat = NULL, Bmat = bmat)
+reg = vars::SVAR(va,estmethod = "direct",Amat = NULL, Bmat=bmat)
+  #estmethod is determined by the Bmatrix. If we do it with NA assigned instead of random, then we are doing recursive identification which is direct. Lecture 9, Slide 13-15.
+
+  #estmethod is determined by the Bmatrix. If we do it with NAs random, then we are doing non-recursive identification which is direct. Lecture 9 Slide 16
+
+#Amatrix: we don't need to do this but look at the lecture also
+
+#Lecture 9, slide 25-29: recursive restrictions/identification example
+
+kable(round(reg$B, 3))
+
+```
+
+```{r}
+vasum <- summary(va)
+vacovres = vasum$covres
+causality(va, cause = "dseasCO")
+vacovres
+vacovres%*%t(vacovres)
+
+```
+
+
+p-value is almost 0, so we reject the null hypothesis, so there is instantaneous causality between at least one of the other variables and the AQI. That was expected.
+
+# Testing Residuals
+
+
+## Serial Correlation
+
+```{r}
+resi = residuals(va, standardize = T)
+MarchTest(resi) #idk if this is right
+
+
+#do this for each one
+adfTest(resi[,1], lag = 1) # no serial correlation
+adfTest(resi[,2], lag = 1) 
+
+#test for conditional heterskedasticity. Do this for each variable.
+par(mfrow=c(2,2))
+plot(ts(resi[,1], start = c(2015,1), freq = 52),
+     xlab = "Year", ylab = "stand-resi",
+     main = "Standardized Residuals")
+acf(resi[,1], lag = 20, main = "ACF for Residuals")
+qqPlot(resi[,1], distribution = "norm", main = "QQ-Plot for Residuals", ylab = "resi")
+pacf(resi[,1]^2, lag = 20, main = "PACF for Squared Residuals")
+```
+
+## IRF
+
+```{r}
+N = ncol(daseas)
+nam = colnames(daseas)
+#Next we create a loop for the impulse responses functions for each period from 0 to 20
+#and we plot these outcomes for ffr
+for (i in 1:N) {
+  IRF = irf(reg,impulse="dseasAQI",response=nam[i],n.ahead=10,
+             ortho = TRUE, boot=TRUE, ci=0.95)
+  plot(IRF)
+}
+
+```
+
+## FEVD
+
+```{r}
+FEVDseasAQI = fevd(reg, n.ahead = 10)$dseasAQI #variable of interest was specified in the question. FEVD = forecast error variance decomposition.
+
+  #all of the results explain the variation of the exchange rate based off shocks to any one of these variables.
+kable(round(FEVDseasAQI,3), caption = 'Exchange Rate Forecast Error Variance Decomposition 10 Lags')
+
+```
+
+# Historical Decomposition
+
+```{r 1b}
+
+N = ncol(daseas)
+nam = colnames(daseas)
+
+#Step 1: first obtain companion form. First obtain structural shocks using regression from the b matrix.
+
+#Step 1a
+B = reg$B #obtain our B matrix from the structural VAR model
+
+#Step 1b. residuals from data set from VAR using updated da data using optimal lag length
+u = residuals(va) #obtain the residuals from the reduced form model
+
+#Step 1c. transpose B matrix and multiply by residuals
+w = solve(B)%*%t(u) #calculate the structural shocks as 
+                    #B inverse times our residual
+w = t(w)
+
+### Step 2: Next calculate thetas. Obtain companion form with 2 lags. Lags were specified in the VAR. N is the number of columns in the data set.  companion form is similar to B matrix, but we are interested in lags rather than number of vars.
+
+## if we were interested in 2 lags, we would do 2x2. 6 lags, 6x6
+
+B = reg$B #obtain our B matrix from the structural VAR model
+u = residuals(va) #obtain the residuals from the reduced form model
+w = solve(B)%*%t(u) #calculate the structural shocks as 
+                    #B inverse times our residual
+w = t(w)
+
+### Next calculate thetas
+#first obtain companion form
+
+a = Bcoef(va) #va is the var model we specified earlier. dimensions is number of columns times number of variables to determine dimensions of the matrix. 3 vars, 4 lags = 12 rows, 12 cols
+a
+I = diag(N) # N is number of columns of the da dataset (number of variables)
+oh = matrix(0,N,N)
+```
+
+```{r}
+# A = rbind(a, cbind(I, oh))
+
+# 3 lags: A = rbind(a,cbind(I, oh, oh))
+## A = rbind(a, cbind(oh, I, oh))
+
+#if we were interested in more lags with more variables, we need to shift both A matrix and J matrix.
+
+
+# Note: when you use the square matrix, then you can do Cholesky decomp form. 5:04 pm about 1.5 hours into the discussion. Ask Tien about this
+
+
+#next obtain J matrix
+J = cbind(I, oh)
+#3 lags: J = cbind(I,oh, oh)
+
+
+# 6 vars, 3lags
+A <- Bcoef(va)
+
+id <- diag(7) #number of vars
+zeros <- matrix(0,nrow=7,ncol=7) # row and col is number of vars
+An <- rbind(A,cbind(id,zeros))
+
+# An <- rbind(An,cbind(zeros,id)) #number of cols should be number of lags
+
+# An <- rbind(An,cbind(zeros,zeros,id))
+
+# An <- rbind(An,cbind(zeros,zeros,zeros,id,zeros,zeros,zeros,zeros))
+# 
+# An <- rbind(An,cbind(zeros,zeros,zeros,zeros,id,zeros,zeros,zeros))
+# 
+# An <- rbind(An,cbind(zeros,zeros,zeros,zeros,zeros,id,zeros,zeros))
+# 
+# An <- rbind(An,cbind(zeros,zeros,zeros,zeros,zeros,zeros,id,zeros))
+
+
+
+# 
+# An <- rbind(An,cbind(zeros,id,zeros,zeros,zeros,zeros,zeros,zeros))
+# 
+# An <- rbind(An,cbind(zeros,zeros,id,zeros,zeros,zeros,zeros,zeros))
+# 
+# An <- rbind(An,cbind(zeros,zeros,zeros,id,zeros,zeros,zeros,zeros))
+# 
+# An <- rbind(An,cbind(zeros,zeros,zeros,zeros,id,zeros,zeros,zeros))
+# 
+# An <- rbind(An,cbind(zeros,zeros,zeros,zeros,zeros,id,zeros,zeros))
+# 
+# An <- rbind(An,cbind(zeros,zeros,zeros,zeros,zeros,zeros,id,zeros))
+```
+
+```{r}
+## creates a list to generate list of A from 0 to t-1
+An.list = list()
+An.list[[1]] = as.matrix(An)
+TT = length(w[,1])
+
+for (j in 1:(TT-1)){
+  An.list[[j+1]] = An.list[[j]]%*%An.list[[1]]
+}
+
+## In this case Theta 1 is the Cholesky decomp.
+###create list of thetas
+THETA = list()
+
+## generate theta_0 values
+## if you need to do Cholesky with a matrix that is smaller than the Cholesky, multiply by Identity matrix then you can multiply by Cholesky.
+
+THETA[[1]] = B
+    ## Next we create the loop to calculate all THETAS up to T-1
+for (i in 1:(TT-1)) {
+  THETA[[i+1]] = (J%*%An.list[[i]]%*%t(J))%*%THETA[[1]]
+}
+
+NAME = colnames(daseas)
+
+# Historical Decomposition
+tg = 1 
+```
+
+```{r}
+##PLOTTING HISTORICAL DECOMP
+yhat = matrix(NA, TT, 7, dimnames = 
+              list(c(), c("Shock1", "Shock2", "Shock3", "Shock4", "Shock 5", "Shock 6", "Shock 7")))
+
+tg = 1
+
+## calculate the first time period manually
+tt = 1
+yhat[tt,] = THETA[[1]][tg,]%*%diag(w[tt,]) #do all 4 shocks at once
+
+
+##calculate all 4 shocks at once for all remaining time periods
+
+###storing all of the shocks from the yhats across all of the first periods. Slide 15 of Lecture 10
+for (tt in 2:TT){
+  jy = THETA[[1]][tg,]%*%diag(w[tt,]) #do all 4 shocks at once
+  for (i in 1:(tt-1)){
+    jy = jy + THETA[[i+1]][tg,]%*%diag(w[(tt-i),]) #do all 4 shocks at once
+  }
+  yhat[tt,] = jy
+}
+#sums all rows of each yhat
+yyhat = rowSums(yhat) ## all contributions of shocks at each time point. All 4 shocks combined at each point in time to movements of Y_t
+yhat2 = yhat[,-c(dseasCO)]
+
+```
+
+```{r 1bplots}
+#plots
+par(mfrow = c(1,1))
+mi = min(yhat)
+mx = max(daseas[-1, tg])
+
+##homework 7 we identified a VAR(2) model based off lag length, so we start in Q3. Historical decomp with each shock and estimated values
+plot(ts(yhat[,1], start = c(2015,2), freq = 52),
+     main = paste("Historical Decomposition for", NAME[tg]), ylab = "", ylim = c(mi, mx))
+lines(ts(yyhat, start = c(2015,2), freq = 52), col = "red")
+lines(ts(yhat[,2], start = c(2015,2), freq = 52), col = "red")
+lines(ts(yhat[,3], start = c(2015,2), freq = 52), col = "blue")
+lines(ts(yhat[,4], start = c(2015,2), freq = 52), col = "orange")
+lines(ts(yhat[,5], start = c(2015,2), freq = 52), col = "magenta")
+lines(ts(yhat[,6], start = c(2015,2), freq = 52), col = "purple")
+lines(ts(yhat[,7], start = c(2015,2), freq = 52), col = "dodgerblue")
+lines(ts(daseas[-(1:3), tg], start = c(2015,2), freq = 52), col = "green") #we lost two data points because of VAR(2) indicates starting 2 lags ahead
+legend("bottomleft", legend = c("Shock1", "Shock2", "Shock3", "Shock4", "Shock5", "Shock6", "Shock7","Actual"), col = c("black", "red", "blue","orange","magenta", "purple", "dodgerblue", "green"), lty = c(1,1,1,1,1,1,1,1), cex = .65)
+
+```
+
+
+```{r 1bplottingY1tn, results = 'hide', fig.show='hide'}
+#sum of all shocks with actual data
+par(mfrow = c(1,1))
+plot(ts(daseas[-1, tg], start = c(2015,2), freq = 52), 
+     main = paste("Historical Decomposition for", NAME[tg]),
+     ylab = "", ylim = c(min(daseas[-1, tg], yyhat), max(daseas[-(1:4), tg], yyhat)))
+lines(ts(yyhat, start = c(2015,2), freq = 52), col = 'dodgerblue')
+legend("topleft", legend = c("Actual", "All Shocks"), col = c('black','dodgerblue'),
+       lty = c(1,1), cex = 0.5)
+
+#The sum of the shocks tracks fairly closely. Look at this without one of the variables like CO
+```
+
+

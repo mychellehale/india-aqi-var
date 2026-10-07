@@ -1,0 +1,23 @@
+# Raw Kaggle data (download separately, see README)
+India/city_day.csv
+India/city_hour.csv
+India/station_day.csv
+India/station_hour.csv
+India/stations.csv
+India/IndianCitiesDatabase.csv
+
+# Superseded drafts and duplicates
+India/FinalProject.Rmd
+India/df_station_day
+MychelleHale_FinalProject.docx
+Research Project Proposal.docx
+
+# Third-party reference paper
+BeijingAirQuality.pdf
+
+.DS_Store
+~$*
+.ipynb_checkpoints/
+.Rhistory
+.RData
+.Rproj.user/
